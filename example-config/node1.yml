@@ -1,0 +1,15 @@
+# This config file specifies required information for a node to successfully join and participate in the protocol
+
+# Network info is specified under the network tab
+network:
+  host: localhost
+  ip: 7500
+
+# Group specifies the name of the system, and is useful for allowing auto discovery
+group:
+  name: mbp-local
+
+# Logging specifies log related information
+logging:
+  level: -1 # debug -1, info 0, error 2
+  # destination: <path to a file>
