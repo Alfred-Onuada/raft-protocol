@@ -60,47 +60,7 @@ type Node struct {
 	State map[string]int
 }
 
-type RequestVoteArgs struct {
-	// the candidate's current term
-	Term uint32
-	// the ID of the candidate requesting the vote
-	CandidateID string
-	// The index of the candidate's last log entry
-	LastLogIndex uint64
-	// the term of the candidate's last log entry
-	LastLogTerm uint32
-}
-
-type RequestVoteResp struct {
-	// the current term on the voter
-	Term uint32
-	// Indicates if the vote was given or not
-	VoteGranted bool
-}
-
-type AppendEntriesArgs struct {
-	// The leader's current term
-	Term uint32
-	// The leader ID ensuring all clients know who the leader is
-	LeaderID string
-	// The index of the last log entry on the leader preceeding the new ones getting sent
-	PrevLogIndex uint64
-	// The term of the PrevLogIndex entry
-	PrevLogTerm uint32
-	// An array of logs to be replicated, if empty the message serves as a heart beat
-	Entries []customtypes.Log
-	// The leader's commit index
-	LeaderCommit uint64
-}
-
-type AppendEntriesResp struct {
-	// Current term of the server for the leader to update itself
-	Term uint32
-	// True if the folower contained entries matching PrevLogIndex and PrevLogTerm
-	Success bool
-}
-
-func (n *Node) RequestVote(args *RequestVoteArgs, resp *RequestVoteResp) error {
+func (n *Node) RequestVote(args *customtypes.RequestVoteArgs, resp *customtypes.RequestVoteResp) error {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 		zap.Uint32("currentTerm", n.CurrentTerm),
@@ -157,7 +117,7 @@ func (n *Node) RequestVote(args *RequestVoteArgs, resp *RequestVoteResp) error {
 	return nil
 }
 
-func (n *Node) AppendEntries(args *AppendEntriesArgs, resp *AppendEntriesResp) error {
+func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customtypes.AppendEntriesResp) error {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
@@ -175,15 +135,9 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, resp *AppendEntriesResp) e
 
 	// If the node is in a lower term than the leader, it should update its term and become a follower
 	if n.CurrentTerm < args.Term {
-		funcLogger.Debug("Updating term to leader's term", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("leaderTerm", args.Term))
-		n.CurrentTerm = args.Term
-		n.VotedFor = ""                                        // Reset the voted for field as it is no longer a candidate
-		n.LeaderID = &args.LeaderID                            // Update the leader ID to the leader's ID
-		n.ElectionTimer.Reset(helpers.GetNewElectionTimeout()) // Reset the election timer as it is now following the leader
-		if n.IsLeader {
-			n.IsLeader = false       // Set the node to not be a leader anymore
-			n.LeaderStopChan <- true // Stop the leader's heartbeat if it was a leader
-		}
+		funcLogger.Debug("Node is in a lower term, transistioning to follower state", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("leaderTerm", args.Term))
+
+		n.TransistionToFollower(args.Term, &args.LeaderID)
 	}
 
 	// Reject the append entries if the entry at PrevLogIndex does not match PrevLogTerm or does not exist
@@ -303,13 +257,13 @@ func (n *Node) RequestMemberVote(member Member) {
 		lastLogTerm = n.Logs[lastLogIndex].Term
 	}
 
-	args := &RequestVoteArgs{
+	args := &customtypes.RequestVoteArgs{
 		Term:         n.CurrentTerm,
 		CandidateID:  n.ID,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogTerm,
 	}
-	var resp RequestVoteResp
+	var resp customtypes.RequestVoteResp
 	err = client.Call("Node.RequestVote", args, &resp)
 	if err != nil {
 		funcLogger.Error("Failed to call RequestVote on member", zap.Error(err))
@@ -337,7 +291,7 @@ func (n *Node) RequestMemberVote(member Member) {
 	}
 }
 
-func (n *Node) SendHeartbeatToMember(member Member, args *AppendEntriesArgs) {
+func (n *Node) SendHeartbeatToMember(member Member, args *customtypes.AppendEntriesArgs) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 		zap.String("memberID", member.ID),
@@ -350,7 +304,7 @@ func (n *Node) SendHeartbeatToMember(member Member, args *AppendEntriesArgs) {
 		return
 	}
 
-	var resp AppendEntriesResp
+	var resp customtypes.AppendEntriesResp
 	err = client.Call("Node.AppendEntries", args, &resp)
 	if err != nil {
 		funcLogger.Error("Failed to call AppendEntries on member", zap.Error(err))
@@ -362,17 +316,8 @@ func (n *Node) SendHeartbeatToMember(member Member, args *AppendEntriesArgs) {
 	// If the member is in a higher term, update the current term, step down and reset the election timer
 	if resp.Term > n.CurrentTerm {
 		funcLogger.Debug("Member is in a higher term, stepping down", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("memberTerm", resp.Term))
-		n.CurrentTerm = resp.Term
-		n.VotedFor = ""  // Reset the voted for field
-		n.LeaderID = nil // Reset the leader ID as it is no longer a leader
 
-		if n.IsLeader {
-			funcLogger.Debug("Stopping leader heartbeat as a new leader has been elected")
-			n.IsLeader = false       // Set the node to not be a leader anymore
-			n.LeaderStopChan <- true // Stop the leader's heartbeat if it was a leader
-		}
-
-		n.ElectionTimer.Reset(helpers.GetNewElectionTimeout()) // Reset the election timer
+		n.TransistionToFollower(resp.Term, nil) // Step down to follower state
 		return
 	}
 }
@@ -405,8 +350,8 @@ func (n *Node) BroadcastHeartbeat() {
 					prevLogTerm = n.Logs[prevLogIndex].Term
 				}
 
-				// Create a new AppendEntriesArgs with an empty entries array
-				args := &AppendEntriesArgs{
+				// Create a new customtypes.AppendEntriesArgs with an empty entries array
+				args := &customtypes.AppendEntriesArgs{
 					Term:         n.CurrentTerm,
 					LeaderID:     n.ID,
 					PrevLogIndex: prevLogIndex,        // No previous log index for heartbeat
@@ -462,6 +407,24 @@ func (n *Node) TransistionToCandidate() {
 		funcLogger.Debug("Requesting vote from member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
 		go n.RequestMemberVote(member)
 	}
+}
+
+func (n *Node) TransistionToFollower(term uint32, leaderId *string) {
+	funcLogger := logger.Log.With(
+		zap.String("nodeID", n.ID),
+	)
+	funcLogger.Debug("Node is transistioning to follower state", zap.String("nodeID", n.ID))
+
+	n.CurrentTerm = term
+	n.VotedFor = ""       // Reset the voted for field
+	n.LeaderID = leaderId // Set the leader ID to the given leader ID
+	if n.IsLeader {
+		funcLogger.Debug("Stopping leader heartbeat as a new leader has been elected")
+		n.IsLeader = false       // Set the node to not be a leader anymore
+		n.LeaderStopChan <- true // Stop the leader's heartbeat if it was a leader
+	}
+	n.ElectionTimer.Reset(helpers.GetNewElectionTimeout()) // Reset the election timer
+	funcLogger.Info("Node has transistioned to follower state", zap.Uint32("currentTerm", n.CurrentTerm), zap.String("votedFor", n.VotedFor), zap.Any("leaderID", n.LeaderID))
 }
 
 func NewNode(config *customtypes.Config) *Node {
