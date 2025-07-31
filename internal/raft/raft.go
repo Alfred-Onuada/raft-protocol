@@ -60,6 +60,7 @@ type Node struct {
 	State map[string]int
 }
 
+// This function handles the RequestVote RPC call
 func (n *Node) RequestVote(args *customtypes.RequestVoteArgs, resp *customtypes.RequestVoteResp) error {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
@@ -117,6 +118,7 @@ func (n *Node) RequestVote(args *customtypes.RequestVoteArgs, resp *customtypes.
 	return nil
 }
 
+// This function handles the AppendEntries RPC call
 func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customtypes.AppendEntriesResp) error {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
@@ -137,7 +139,7 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 	if n.CurrentTerm < args.Term {
 		funcLogger.Debug("Node is in a lower term, transistioning to follower state", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("leaderTerm", args.Term))
 
-		n.TransistionToFollower(args.Term, &args.LeaderID)
+		n.transistionToFollower(args.Term, &args.LeaderID)
 	}
 
 	// Reject the append entries if the entry at PrevLogIndex does not match PrevLogTerm or does not exist
@@ -191,7 +193,7 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 		entry := n.Logs[i]
 		funcLogger.Debug("Applying log entry to state machine", zap.Any("entry", entry))
 
-		n.ApplyLogToStateMachine(entry, i)
+		n.applyLogToStateMachine(entry, i)
 	}
 
 	funcLogger.Debug("AppendEntries successful", zap.Uint64("commitIndex", n.CommitIndex), zap.Uint64("lastApplied", n.LastApplied))
@@ -204,7 +206,97 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 	return nil
 }
 
-func (n *Node) ApplyLogToStateMachine(entry customtypes.Log, index uint64) {
+// This function handles ClientCommand RPC call, it is called by the client to send commands to the Raft cluster
+func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customtypes.ClientCommandsResp) error {
+	funcLogger := logger.Log.With(
+		zap.String("nodeID", n.ID),
+		zap.Any("command", args.Command),
+	)
+
+	// If this node is not the leader, return the leader's ID and address
+	if !n.IsLeader {
+		funcLogger.Debug("Command was received on a follower, returning leader information")
+		if n.LeaderID != nil {
+			// Find the leader's address from Members
+			for _, member := range n.Members {
+				if member.ID == *n.LeaderID {
+					resp.LeaderID = *n.LeaderID
+					resp.LeaderAddress = member.Address
+					resp.Success = false
+					resp.Error = "Command received on a follower, please contact the leader"
+					return nil
+				}
+			}
+		}
+
+		// Fail if there is no leader in the cluster
+		resp.Success = false
+		resp.Error = "No leader known at this moment"
+		return nil
+	}
+
+	// Append the command to the log
+	logEntry := customtypes.Log{
+		Term:      n.CurrentTerm,
+		Content:   args.Command,
+		Timestamp: time.Now(),
+		Index:     uint64(len(n.Logs)), // The index is the current length
+	}
+
+	funcLogger.Debug("Appending client command to log", zap.Any("logEntry", logEntry))
+	n.Logs = append(n.Logs, logEntry)
+
+	// Replicate the log entry to followers (the heartbeat already contains logic to send the appropriate logs)
+	for _, member := range n.Members {
+		if member.ID == n.ID {
+			continue // Skip itself
+		}
+
+		funcLogger.Debug("Replicating log entry to member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
+		go n.sendHeartbeatToMember(member, &customtypes.AppendEntriesArgs{
+			Term:         n.CurrentTerm,
+			LeaderID:     n.ID,
+			PrevLogIndex: uint64(len(n.Logs) - 2),     // The previous log index is the last log index before this one
+			PrevLogTerm:  n.Logs[len(n.Logs)-2].Term,  // The term of the previous log entry
+			Entries:      []customtypes.Log{logEntry}, // Send the new log entry
+			LeaderCommit: n.CommitIndex,               // The current commit index
+		})
+	}
+
+	// Wait for the command to be committed (replicated to a majority of nodes)
+	time.Sleep(1000 * time.Millisecond) // In production this would be replaced with something more robust
+	if n.CommitIndex < uint64(len(n.Logs)-1) {
+		funcLogger.Warn("Timeout exceeded while waiting for command to be committed", zap.Uint64("commitIndex", n.CommitIndex), zap.Uint64("logLength", uint64(len(n.Logs)-1)))
+		resp.Success = false
+		resp.Error = "Timeout exceeded while waiting for command to be committed"
+		return nil
+	}
+
+	// Apply the command to the state machine if not already applied
+	if n.LastApplied < uint64(len(n.Logs)-1) {
+		n.applyLogToStateMachine(logEntry, uint64(len(n.Logs)-1))
+	}
+
+	// Handle response based on command type
+	resp.Success = true
+	switch args.Command.Type {
+	case customtypes.GetCommand:
+		if value, exists := n.State[args.Command.Key]; exists {
+			resp.Result = value
+		} else {
+			resp.Success = false
+			resp.Error = "Key not found"
+		}
+	default:
+		resp.Result = nil // No result for Set, Increase, Decrease, Delete
+	}
+
+	funcLogger.Debug("Client command processed successfully", zap.Any("response", resp))
+	return nil
+}
+
+// applyLogToStateMachine applies the log entry to the state machine
+func (n *Node) applyLogToStateMachine(entry customtypes.Log, index uint64) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
@@ -234,7 +326,8 @@ func (n *Node) ApplyLogToStateMachine(entry customtypes.Log, index uint64) {
 	funcLogger.Debug("State machine updated", zap.Any("state", n.State))
 }
 
-func (n *Node) RequestMemberVote(member Member) {
+// requestMemberVote requests a vote from a member of the Raft cluster, this triggers the RPC call to the member's RequestVote method
+func (n *Node) requestMemberVote(member Member) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 		zap.String("memberID", member.ID),
@@ -284,14 +377,15 @@ func (n *Node) RequestMemberVote(member Member) {
 			n.ElectionTimer.Reset(helpers.GetNewElectionTimeout())
 			// Begin broadcasting heartbeats to other members
 			funcLogger.Debug("Broadcasting heartbeat to other members")
-			n.BroadcastHeartbeat()
+			n.broadcastHeartbeat()
 		}
 	} else {
 		funcLogger.Debug("Vote not granted by member", zap.String("memberID", member.ID), zap.Uint32("term", resp.Term))
 	}
 }
 
-func (n *Node) SendHeartbeatToMember(member Member, args *customtypes.AppendEntriesArgs) {
+// sendHeartbeatToMember sends a heartbeat to a member of the Raft cluster, this triggers the RPC call to the member's AppendEntries method
+func (n *Node) sendHeartbeatToMember(member Member, args *customtypes.AppendEntriesArgs) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 		zap.String("memberID", member.ID),
@@ -317,12 +411,59 @@ func (n *Node) SendHeartbeatToMember(member Member, args *customtypes.AppendEntr
 	if resp.Term > n.CurrentTerm {
 		funcLogger.Debug("Member is in a higher term, stepping down", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("memberTerm", resp.Term))
 
-		n.TransistionToFollower(resp.Term, nil) // Step down to follower state
+		n.transistionToFollower(resp.Term, nil) // Step down to follower state
 		return
+	}
+
+	// Update the members details with
+	if resp.Success {
+		// To avoid an out of bounds error, we check if the entries array is not empty
+		if len(args.Entries) > 0 {
+			member.NextIndex = args.Entries[len(args.Entries)-1].Index + 1 // Update the next index to the last entry's index + 1
+			member.MatchIndex = args.Entries[len(args.Entries)-1].Index    // Update the match index to the last entry's index
+		}
+
+		n.updateCommitIndex()
+
+		funcLogger.Debug("Heartbeat sent successfully, updated member details",
+			zap.String("memberID", member.ID),
+			zap.Uint64("nextIndex", member.NextIndex),
+			zap.Uint64("matchIndex", member.MatchIndex),
+		)
 	}
 }
 
-func (n *Node) BroadcastHeartbeat() {
+// updateCommitIndex updates the commit index based on the logs and the members' match indices
+func (n *Node) updateCommitIndex() {
+	funcLogger := logger.Log.With(zap.String("nodeID", n.ID))
+
+	// Count how many followers have replicated each log index
+	for i := n.CommitIndex + 1; i < uint64(len(n.Logs)); i++ {
+		count := 1 // Count the leader itself
+		for _, member := range n.Members {
+			if member.ID == n.ID {
+				continue
+			}
+			if member.MatchIndex >= i {
+				count++
+			}
+		}
+		// If a majority has replicated this index and it’s from the current term
+		if count > len(n.Members)/2 && n.Logs[i].Term == n.CurrentTerm {
+			n.CommitIndex = i
+			funcLogger.Debug("Updated CommitIndex", zap.Uint64("commitIndex", n.CommitIndex))
+			// Apply committed entries to state machine
+			for j := n.LastApplied + 1; j <= n.CommitIndex; j++ {
+				n.applyLogToStateMachine(n.Logs[j], j)
+			}
+		} else {
+			break
+		}
+	}
+}
+
+// This function broadcasts heartbeats to all members of the Raft cluster
+func (n *Node) broadcastHeartbeat() {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
@@ -354,14 +495,14 @@ func (n *Node) BroadcastHeartbeat() {
 				args := &customtypes.AppendEntriesArgs{
 					Term:         n.CurrentTerm,
 					LeaderID:     n.ID,
-					PrevLogIndex: prevLogIndex,        // No previous log index for heartbeat
-					PrevLogTerm:  prevLogTerm,         // No previous log term for heartbeat
-					Entries:      []customtypes.Log{}, // Empty entries for heartbeat
-					LeaderCommit: n.CommitIndex,       // Current commit index
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					Entries:      n.Logs[member.NextIndex:], // send all the missing logs to the member (not super performant but works)
+					LeaderCommit: n.CommitIndex,             // Current commit index
 				}
 
 				funcLogger.Debug("Sending heartbeat to member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
-				go n.SendHeartbeatToMember(member, args)
+				go n.sendHeartbeatToMember(member, args)
 			}
 
 			// This represents the heartbeat interval
@@ -370,17 +511,19 @@ func (n *Node) BroadcastHeartbeat() {
 	}
 }
 
-func (n *Node) CheckElectionTimeoutExpiry() {
+// checkElectionTimeoutExpiry checks if the election timer has expired, if it has, it transistions the node to a candidate state
+func (n *Node) checkElectionTimeoutExpiry() {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
 	<-n.ElectionTimer.C
 	// When the election timer expires, become a candidate
 	funcLogger.Debug("Election timer expired, transistioning to candidate state")
-	n.TransistionToCandidate()
+	n.transistionToCandidate()
 }
 
-func (n *Node) TransistionToCandidate() {
+// transistionToCandidate transistions the node to a candidate state, increments the term, and requests votes from other members
+func (n *Node) transistionToCandidate() {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
@@ -393,7 +536,7 @@ func (n *Node) TransistionToCandidate() {
 
 	// Reset the election timer
 	n.ElectionTimer.Reset(helpers.GetNewElectionTimeout())
-	go n.CheckElectionTimeoutExpiry()
+	go n.checkElectionTimeoutExpiry()
 
 	// Log the new term and state
 	funcLogger.Info("Node has become a candidate", zap.Uint32("currentTerm", n.CurrentTerm), zap.String("votedFor", n.VotedFor))
@@ -405,11 +548,12 @@ func (n *Node) TransistionToCandidate() {
 		}
 
 		funcLogger.Debug("Requesting vote from member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
-		go n.RequestMemberVote(member)
+		go n.requestMemberVote(member)
 	}
 }
 
-func (n *Node) TransistionToFollower(term uint32, leaderId *string) {
+// transistionToFollower transistions the node to a follower state, updates the term, resets the votedFor field, and sets the leader ID
+func (n *Node) transistionToFollower(term uint32, leaderId *string) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
@@ -427,7 +571,8 @@ func (n *Node) TransistionToFollower(term uint32, leaderId *string) {
 	funcLogger.Info("Node has transistioned to follower state", zap.Uint32("currentTerm", n.CurrentTerm), zap.String("votedFor", n.VotedFor), zap.Any("leaderID", n.LeaderID))
 }
 
-func NewNode(config *customtypes.Config) *Node {
+// newNode creates a new Raft node with the given configuration
+func newNode(config *customtypes.Config) *Node {
 	// Generate the members
 	members := make([]Member, len(config.Group.Members))
 	for i, memberAddress := range config.Group.Members {
@@ -447,7 +592,7 @@ func NewNode(config *customtypes.Config) *Node {
 		// This must be less than the MTBF
 		ElectionTimer: time.NewTimer(helpers.GetNewElectionTimeout()),
 		// This must be less than the election timeout to ensure that the leader sends heartbeats before followers can time out
-		HeartBeatInterval: 1000 * time.Millisecond, // This is fixed for all nodes,
+		HeartBeatInterval: 500 * time.Millisecond, // This is fixed for all nodes,
 		// Intialize all other fields to their default values
 		CurrentTerm:    0,
 		VotedFor:       "",
@@ -462,10 +607,11 @@ func NewNode(config *customtypes.Config) *Node {
 	}
 }
 
+// Init initializes the Raft node, registers it for RPC, and starts listening for incoming requests
 func Init(config *customtypes.Config) {
 	// Initialize a new node
 	logger.Log.Debug("Initializing a new Raft node")
-	node := NewNode(config)
+	node := newNode(config)
 	logger.Log.Debug("New Raft node initialized", zap.String("nodeID", node.ID))
 
 	// build the node address
@@ -489,7 +635,7 @@ func Init(config *customtypes.Config) {
 	}
 	funcLogger.Debug("Listening for RPC requests", zap.String("address", address))
 
-	go node.CheckElectionTimeoutExpiry()
+	go node.checkElectionTimeoutExpiry()
 
 	// Accept connections and serve requests
 	for {

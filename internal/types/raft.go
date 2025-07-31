@@ -13,6 +13,7 @@ const (
 	IncreaseCommand CommandType = "increase"
 	DecreaseCommand CommandType = "decrease"
 	DelCommand      CommandType = "del"
+	GetCommand      CommandType = "get"
 )
 
 type Command struct {

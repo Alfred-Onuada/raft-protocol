@@ -15,5 +15,5 @@ group:
 
 # Logging specifies log related information
 logging:
-  level: -1 # debug -1, info 0, error 2
+  level: 0 # debug -1, info 0, error 2
   # destination: <path to a file>

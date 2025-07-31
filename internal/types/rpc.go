@@ -39,3 +39,21 @@ type AppendEntriesResp struct {
 	// True if the folower contained entries matching PrevLogIndex and PrevLogTerm
 	Success bool
 }
+
+type ClientCommandsArgs struct {
+	// The incoming command from the client
+	Command Command
+}
+
+type ClientCommandsResp struct {
+	// Indicates if the command was successful or not
+	Success bool
+	// If the command was not successful, this will contain the error message
+	Error string
+	// The result of the command if it was successful
+	Result any
+	// The leader ID of the node that processed the command
+	LeaderID string
+	// The address of the leader node for the client to connect to
+	LeaderAddress string
+}
