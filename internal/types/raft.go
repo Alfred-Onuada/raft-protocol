@@ -16,6 +16,14 @@ const (
 	GetCommand      CommandType = "get"
 )
 
+func (c CommandType) IsValid() bool {
+	switch c {
+	case SetCommand, IncreaseCommand, DecreaseCommand, DelCommand, GetCommand:
+		return true
+	}
+	return false
+}
+
 type Command struct {
 	// The type of command
 	Type CommandType

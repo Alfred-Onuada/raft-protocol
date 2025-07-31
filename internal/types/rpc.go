@@ -56,4 +56,6 @@ type ClientCommandsResp struct {
 	LeaderID string
 	// The address of the leader node for the client to connect to
 	LeaderAddress string
+	// Indicates if the command needs to be redirected to the leader
+	Redirect bool
 }

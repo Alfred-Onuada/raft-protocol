@@ -213,22 +213,28 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 		zap.Any("command", args.Command),
 	)
 
+	funcLogger.Debug("Received ClientCommand RPC", zap.Any("args", args))
+
 	// If this node is not the leader, return the leader's ID and address
 	if !n.IsLeader {
 		funcLogger.Debug("Command was received on a follower, returning leader information")
+
 		if n.LeaderID != nil {
 			// Find the leader's address from Members
 			for _, member := range n.Members {
 				if member.ID == *n.LeaderID {
+					funcLogger.Debug("Found leader address", zap.String("leaderID", *n.LeaderID), zap.String("leaderAddress", member.Address))
+
 					resp.LeaderID = *n.LeaderID
 					resp.LeaderAddress = member.Address
-					resp.Success = false
-					resp.Error = "Command received on a follower, please contact the leader"
+					resp.Redirect = true // tells it to proceed on leader
+
 					return nil
 				}
 			}
 		}
 
+		funcLogger.Debug("No leader found, cannot redirect command")
 		// Fail if there is no leader in the cluster
 		resp.Success = false
 		resp.Error = "No leader known at this moment"
@@ -264,7 +270,7 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 	}
 
 	// Wait for the command to be committed (replicated to a majority of nodes)
-	time.Sleep(1000 * time.Millisecond) // In production this would be replaced with something more robust
+	time.Sleep(1000 * time.Millisecond) // In production this would be replaced with something more robust, for now it's a simple timeout
 	if n.CommitIndex < uint64(len(n.Logs)-1) {
 		funcLogger.Warn("Timeout exceeded while waiting for command to be committed", zap.Uint64("commitIndex", n.CommitIndex), zap.Uint64("logLength", uint64(len(n.Logs)-1)))
 		resp.Success = false
@@ -277,11 +283,19 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 		n.applyLogToStateMachine(logEntry, uint64(len(n.Logs)-1))
 	}
 
-	// Handle response based on command type
+	// If command is not a mutation command, applying to state machine does nothing, so here the command is processed and the response is set
+	n.executeNonMutationCommands(args.Command, resp)
+
+	funcLogger.Debug("Client command processed successfully", zap.Any("response", resp))
+	return nil
+}
+
+func (n *Node) executeNonMutationCommands(command customtypes.Command, resp *customtypes.ClientCommandsResp) {
 	resp.Success = true
-	switch args.Command.Type {
+
+	switch command.Type {
 	case customtypes.GetCommand:
-		if value, exists := n.State[args.Command.Key]; exists {
+		if value, exists := n.State[command.Key]; exists {
 			resp.Result = value
 		} else {
 			resp.Success = false
@@ -290,9 +304,6 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 	default:
 		resp.Result = nil // No result for Set, Increase, Decrease, Delete
 	}
-
-	funcLogger.Debug("Client command processed successfully", zap.Any("response", resp))
-	return nil
 }
 
 // applyLogToStateMachine applies the log entry to the state machine
@@ -341,6 +352,7 @@ func (n *Node) requestMemberVote(member Member) {
 		funcLogger.Error("Failed to dial member for vote request", zap.Error(err))
 		return
 	}
+	defer client.Close() // Ensure the client is closed after the request
 
 	// This prevents an array out of bounds error if there are no logs
 	lastLogIndex := uint64(0)
@@ -397,6 +409,7 @@ func (n *Node) sendHeartbeatToMember(member Member, args *customtypes.AppendEntr
 		funcLogger.Error("Failed to dial member for heartbeat", zap.Error(err))
 		return
 	}
+	defer client.Close() // Ensure the client is closed after the request
 
 	var resp customtypes.AppendEntriesResp
 	err = client.Call("Node.AppendEntries", args, &resp)

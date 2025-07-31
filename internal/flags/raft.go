@@ -5,12 +5,12 @@ import (
 	"flag"
 )
 
-type Flags struct {
+type flags struct {
 	ConfigFilePath string
 }
 
-func InitFlags() *Flags {
-	config := Flags{}
+func InitFlags() *flags {
+	config := flags{}
 
 	configFile := flag.String("config", "", "The configuration file path for this node")
 
