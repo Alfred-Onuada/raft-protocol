@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/Alfred-Onuada/raft-protocol/internal/flags"
 	logger "github.com/Alfred-Onuada/raft-protocol/internal/logging"
+	"github.com/Alfred-Onuada/raft-protocol/internal/raft"
 	customtypes "github.com/Alfred-Onuada/raft-protocol/internal/types"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -37,7 +39,15 @@ func main() {
 		panic(err)
 	}
 
-	logger.Log.Info("Spinning up Raft node", zap.Any("config", config))
+	logger.Log.Info(
+		fmt.Sprintf("Spinning up Raft node at %s:%s", config.Network.Host, config.Network.IP),
+		zap.Any("config", config),
+	)
 
-	// Attempt to parse the config provided
+	defer func() {
+		logger.Log.Info(fmt.Sprintf("Shutting down Raft node at %s:%s", config.Network.Host, config.Network.IP))
+	}()
+
+	logger.Log.Debug("Initializing Raft protocol with config", zap.Any("config", config))
+	raft.Init(&config)
 }

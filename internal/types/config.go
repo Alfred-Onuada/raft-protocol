@@ -19,7 +19,8 @@ type logging struct {
 }
 
 type group struct {
-	Name string `yaml:"name"`
+	Name    string   `yaml:"name"`
+	Members []string `yaml:"members"`
 }
 
 type Config struct {

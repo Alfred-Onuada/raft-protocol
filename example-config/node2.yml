@@ -8,6 +8,10 @@ network:
 # Group specifies the name of the system, and is useful for allowing auto discovery
 group:
   name: mbp-local
+  members:
+    - localhost:7500
+    - localhost:7501
+    - localhost:7502
 
 # Logging specifies log related information
 logging:
