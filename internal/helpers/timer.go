@@ -7,9 +7,10 @@ import (
 )
 
 func GetNewElectionTimeout() time.Duration {
-	// Generate a random timeout between 150ms and 300ms exclusive
+	// Generate a random timeout between 5000ms and 10000ms exclusive
+	// In production, this should be between 150ms and 300ms but for testing purposes, we use a larger range so we can see the logs more clearly
 	millisecondsToNanoseconds := 1_000_000
-	timeoutMs := rand.Intn(150) + 150
+	timeoutMs := rand.Intn(5000) + 10000
 	timeoutNs := timeoutMs * millisecondsToNanoseconds
 
 	return time.Duration(timeoutNs)

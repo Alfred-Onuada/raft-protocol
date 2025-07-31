@@ -162,7 +162,7 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, resp *AppendEntriesResp) e
 		zap.String("nodeID", n.ID),
 	)
 
-	funcLogger.Debug("Received AppendEntries RPC", zap.Any("args", args), zap.Any("currentState", n))
+	funcLogger.Debug("Received AppendEntries RPC", zap.Any("args", args))
 
 	// If the node is in a higher term than the leader, it should reject the append entries
 	if n.CurrentTerm > args.Term {
@@ -170,10 +170,24 @@ func (n *Node) AppendEntries(args *AppendEntriesArgs, resp *AppendEntriesResp) e
 
 		resp.Term = n.CurrentTerm
 		resp.Success = false
+		return nil
+	}
+
+	// If the node is in a lower term than the leader, it should update its term and become a follower
+	if n.CurrentTerm < args.Term {
+		funcLogger.Debug("Updating term to leader's term", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("leaderTerm", args.Term))
+		n.CurrentTerm = args.Term
+		n.VotedFor = ""                                        // Reset the voted for field as it is no longer a candidate
+		n.LeaderID = &args.LeaderID                            // Update the leader ID to the leader's ID
+		n.ElectionTimer.Reset(helpers.GetNewElectionTimeout()) // Reset the election timer as it is now following the leader
+		if n.IsLeader {
+			n.IsLeader = false       // Set the node to not be a leader anymore
+			n.LeaderStopChan <- true // Stop the leader's heartbeat if it was a leader
+		}
 	}
 
 	// Reject the append entries if the entry at PrevLogIndex does not match PrevLogTerm or does not exist
-	if int(args.PrevLogIndex) > len(n.Logs)-1 || n.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
+	if len(n.Logs) > 0 && (args.PrevLogIndex > uint64(len(n.Logs)-1) || n.Logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
 		funcLogger.Debug("Rejecting AppendEntries due to mismatch at PrevLogIndex", zap.Uint64("prevLogIndex", args.PrevLogIndex), zap.Uint32("prevLogTerm", args.PrevLogTerm))
 
 		resp.Term = n.CurrentTerm
@@ -344,6 +358,23 @@ func (n *Node) SendHeartbeatToMember(member Member, args *AppendEntriesArgs) {
 	}
 
 	funcLogger.Debug("Received AppendEntries response from member", zap.Any("response", resp))
+
+	// If the member is in a higher term, update the current term, step down and reset the election timer
+	if resp.Term > n.CurrentTerm {
+		funcLogger.Debug("Member is in a higher term, stepping down", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("memberTerm", resp.Term))
+		n.CurrentTerm = resp.Term
+		n.VotedFor = ""  // Reset the voted for field
+		n.LeaderID = nil // Reset the leader ID as it is no longer a leader
+
+		if n.IsLeader {
+			funcLogger.Debug("Stopping leader heartbeat as a new leader has been elected")
+			n.IsLeader = false       // Set the node to not be a leader anymore
+			n.LeaderStopChan <- true // Stop the leader's heartbeat if it was a leader
+		}
+
+		n.ElectionTimer.Reset(helpers.GetNewElectionTimeout()) // Reset the election timer
+		return
+	}
 }
 
 func (n *Node) BroadcastHeartbeat() {
@@ -352,16 +383,6 @@ func (n *Node) BroadcastHeartbeat() {
 	)
 
 	funcLogger.Debug("Broadcasting heartbeat to other members", zap.String("leaderID", n.ID))
-
-	// Create a new AppendEntriesArgs with an empty entries array
-	args := &AppendEntriesArgs{
-		Term:         n.CurrentTerm,
-		LeaderID:     n.ID,
-		PrevLogIndex: 0,                   // No previous log index for heartbeat
-		PrevLogTerm:  0,                   // No previous log term for heartbeat
-		Entries:      []customtypes.Log{}, // Empty entries for heartbeat
-		LeaderCommit: n.CommitIndex,       // Current commit index
-	}
 
 	// Indefinitely send heartbeats to all members until a new leader is elected
 	for {
@@ -374,6 +395,24 @@ func (n *Node) BroadcastHeartbeat() {
 			for _, member := range n.Members {
 				if member.ID == n.ID {
 					continue // Skip itself
+				}
+
+				// This prevents an array out of bounds error if there are no logs
+				prevLogIndex := uint64(0)
+				prevLogTerm := uint32(0)
+				if len(n.Logs) > 0 {
+					prevLogIndex = uint64(len(n.Logs) - 1)
+					prevLogTerm = n.Logs[prevLogIndex].Term
+				}
+
+				// Create a new AppendEntriesArgs with an empty entries array
+				args := &AppendEntriesArgs{
+					Term:         n.CurrentTerm,
+					LeaderID:     n.ID,
+					PrevLogIndex: prevLogIndex,        // No previous log index for heartbeat
+					PrevLogTerm:  prevLogTerm,         // No previous log term for heartbeat
+					Entries:      []customtypes.Log{}, // Empty entries for heartbeat
+					LeaderCommit: n.CommitIndex,       // Current commit index
 				}
 
 				funcLogger.Debug("Sending heartbeat to member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
@@ -445,7 +484,7 @@ func NewNode(config *customtypes.Config) *Node {
 		// This must be less than the MTBF
 		ElectionTimer: time.NewTimer(helpers.GetNewElectionTimeout()),
 		// This must be less than the election timeout to ensure that the leader sends heartbeats before followers can time out
-		HeartBeatInterval: 20 * time.Millisecond, // This is fixed for all nodes,
+		HeartBeatInterval: 1000 * time.Millisecond, // This is fixed for all nodes,
 		// Intialize all other fields to their default values
 		CurrentTerm:    0,
 		VotedFor:       "",
