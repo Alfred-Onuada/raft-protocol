@@ -12,7 +12,7 @@ import (
 // ExecuteCommand connects to the specified Raft node and executes the given command.
 // It returns the result of the command or an error if the command failed.
 func ExecuteCommand(nodeAddr string, command customtypes.Command) (*customtypes.ClientCommandsResp, error) {
-	logger.Log.Info("Connecting to Raft node",
+	logger.Log.Debug("Connecting to Raft node",
 		zap.String("nodeAddress", nodeAddr),
 	)
 	client, err := rpc.Dial("tcp", nodeAddr)

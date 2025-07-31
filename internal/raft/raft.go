@@ -144,7 +144,7 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 
 	// Reject the append entries if the entry at PrevLogIndex does not match PrevLogTerm or does not exist
 	if len(n.Logs) > 0 && (args.PrevLogIndex > uint64(len(n.Logs)-1) || n.Logs[args.PrevLogIndex].Term != args.PrevLogTerm) {
-		funcLogger.Debug("Rejecting AppendEntries due to mismatch at PrevLogIndex", zap.Uint64("prevLogIndex", args.PrevLogIndex), zap.Uint32("prevLogTerm", args.PrevLogTerm))
+		funcLogger.Debug("Rejecting AppendEntries due to mismatch at PrevLogIndex", zap.Uint64("prevLogIndex", args.PrevLogIndex), zap.Uint32("prevLogTerm", args.PrevLogTerm), zap.Any("logs", n.Logs))
 
 		resp.Term = n.CurrentTerm
 		resp.Success = false
@@ -213,7 +213,7 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 		zap.Any("command", args.Command),
 	)
 
-	funcLogger.Debug("Received ClientCommand RPC", zap.Any("args", args))
+	funcLogger.Debug("Received ClientCommand RPC", zap.Any("args", args), zap.Bool("isLeader", n.IsLeader))
 
 	// If this node is not the leader, return the leader's ID and address
 	if !n.IsLeader {
@@ -253,24 +253,10 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 	n.Logs = append(n.Logs, logEntry)
 
 	// Replicate the log entry to followers (the heartbeat already contains logic to send the appropriate logs)
-	for _, member := range n.Members {
-		if member.ID == n.ID {
-			continue // Skip itself
-		}
-
-		funcLogger.Debug("Replicating log entry to member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
-		go n.sendHeartbeatToMember(member, &customtypes.AppendEntriesArgs{
-			Term:         n.CurrentTerm,
-			LeaderID:     n.ID,
-			PrevLogIndex: uint64(len(n.Logs) - 2),     // The previous log index is the last log index before this one
-			PrevLogTerm:  n.Logs[len(n.Logs)-2].Term,  // The term of the previous log entry
-			Entries:      []customtypes.Log{logEntry}, // Send the new log entry
-			LeaderCommit: n.CommitIndex,               // The current commit index
-		})
-	}
+	n.replicateLogEntriesToMembers([]customtypes.Log{logEntry})
 
 	// Wait for the command to be committed (replicated to a majority of nodes)
-	time.Sleep(1000 * time.Millisecond) // In production this would be replaced with something more robust, for now it's a simple timeout
+	time.Sleep(5000 * time.Millisecond) // In production this would be replaced with something more robust, for now it's a simple timeout
 	if n.CommitIndex < uint64(len(n.Logs)-1) {
 		funcLogger.Warn("Timeout exceeded while waiting for command to be committed", zap.Uint64("commitIndex", n.CommitIndex), zap.Uint64("logLength", uint64(len(n.Logs)-1)))
 		resp.Success = false
@@ -288,6 +274,37 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 
 	funcLogger.Debug("Client command processed successfully", zap.Any("response", resp))
 	return nil
+}
+
+func (n *Node) replicateLogEntriesToMembers(logEntries []customtypes.Log) {
+	funcLogger := logger.Log.With(
+		zap.String("nodeID", n.ID),
+	)
+
+	funcLogger.Debug("Replicating log entry to members", zap.Any("logEntries", logEntries))
+
+	for memberIdx, member := range n.Members {
+		if member.ID == n.ID {
+			continue // Skip itself
+		}
+
+		funcLogger.Debug("Replicating log entry to member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
+		prevLogIndex := uint64(0)
+		prevLogTerm := uint32(0)
+		if len(n.Logs) > 0 {
+			prevLogIndex = uint64(len(n.Logs) - 1)
+			prevLogTerm = n.Logs[prevLogIndex].Term
+		}
+
+		go n.sendHeartbeatToMember(member, memberIdx, &customtypes.AppendEntriesArgs{
+			Term:         n.CurrentTerm,
+			LeaderID:     n.ID,
+			PrevLogIndex: prevLogIndex,  // The previous log index is the last log index before this one
+			PrevLogTerm:  prevLogTerm,   // The term of the previous log entry
+			Entries:      logEntries,    // Send the new log entries
+			LeaderCommit: n.CommitIndex, // The current commit index
+		})
+	}
 }
 
 func (n *Node) executeNonMutationCommands(command customtypes.Command, resp *customtypes.ClientCommandsResp) {
@@ -385,6 +402,7 @@ func (n *Node) requestMemberVote(member Member) {
 		if n.VotesReceived > len(n.Members)/2 {
 			funcLogger.Info("Node has become the leader", zap.String("nodeID", n.ID), zap.Uint32("currentTerm", n.CurrentTerm))
 			n.LeaderID = &n.ID
+			n.IsLeader = true
 			// Reset the election timer as the node is now the leader
 			n.ElectionTimer.Reset(helpers.GetNewElectionTimeout())
 			// Begin broadcasting heartbeats to other members
@@ -397,7 +415,7 @@ func (n *Node) requestMemberVote(member Member) {
 }
 
 // sendHeartbeatToMember sends a heartbeat to a member of the Raft cluster, this triggers the RPC call to the member's AppendEntries method
-func (n *Node) sendHeartbeatToMember(member Member, args *customtypes.AppendEntriesArgs) {
+func (n *Node) sendHeartbeatToMember(member Member, memberIdx int, args *customtypes.AppendEntriesArgs) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 		zap.String("memberID", member.ID),
@@ -432,16 +450,16 @@ func (n *Node) sendHeartbeatToMember(member Member, args *customtypes.AppendEntr
 	if resp.Success {
 		// To avoid an out of bounds error, we check if the entries array is not empty
 		if len(args.Entries) > 0 {
-			member.NextIndex = args.Entries[len(args.Entries)-1].Index + 1 // Update the next index to the last entry's index + 1
-			member.MatchIndex = args.Entries[len(args.Entries)-1].Index    // Update the match index to the last entry's index
+			n.Members[memberIdx].NextIndex = args.Entries[len(args.Entries)-1].Index + 1 // Update the next index to the last entry's index + 1
+			n.Members[memberIdx].MatchIndex = args.Entries[len(args.Entries)-1].Index    // Update the match index to the last entry's index
 		}
 
 		n.updateCommitIndex()
 
 		funcLogger.Debug("Heartbeat sent successfully, updated member details",
 			zap.String("memberID", member.ID),
-			zap.Uint64("nextIndex", member.NextIndex),
-			zap.Uint64("matchIndex", member.MatchIndex),
+			zap.Uint64("nextIndex", n.Members[memberIdx].NextIndex),
+			zap.Uint64("matchIndex", n.Members[memberIdx].MatchIndex),
 		)
 	}
 }
@@ -449,6 +467,8 @@ func (n *Node) sendHeartbeatToMember(member Member, args *customtypes.AppendEntr
 // updateCommitIndex updates the commit index based on the logs and the members' match indices
 func (n *Node) updateCommitIndex() {
 	funcLogger := logger.Log.With(zap.String("nodeID", n.ID))
+
+	funcLogger.Debug("Updating commit index based on members' match indices", zap.Uint64("currentCommitIndex", n.CommitIndex), zap.Int("logsLength", len(n.Logs)))
 
 	// Count how many followers have replicated each log index
 	for i := n.CommitIndex + 1; i < uint64(len(n.Logs)); i++ {
@@ -461,14 +481,13 @@ func (n *Node) updateCommitIndex() {
 				count++
 			}
 		}
+
+		funcLogger.Debug("Checking for majority replication", zap.Uint64("index", i), zap.Int("count", count))
+
 		// If a majority has replicated this index and it’s from the current term
 		if count > len(n.Members)/2 && n.Logs[i].Term == n.CurrentTerm {
 			n.CommitIndex = i
 			funcLogger.Debug("Updated CommitIndex", zap.Uint64("commitIndex", n.CommitIndex))
-			// Apply committed entries to state machine
-			for j := n.LastApplied + 1; j <= n.CommitIndex; j++ {
-				n.applyLogToStateMachine(n.Logs[j], j)
-			}
 		} else {
 			break
 		}
@@ -491,7 +510,7 @@ func (n *Node) broadcastHeartbeat() {
 			n.LeaderStopChan = make(chan bool) // Reset the channel so it's back to a clean state
 			return
 		default:
-			for _, member := range n.Members {
+			for memberIdx, member := range n.Members {
 				if member.ID == n.ID {
 					continue // Skip itself
 				}
@@ -515,7 +534,7 @@ func (n *Node) broadcastHeartbeat() {
 				}
 
 				funcLogger.Debug("Sending heartbeat to member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
-				go n.sendHeartbeatToMember(member, args)
+				go n.sendHeartbeatToMember(member, memberIdx, args)
 			}
 
 			// This represents the heartbeat interval
@@ -605,7 +624,7 @@ func newNode(config *customtypes.Config) *Node {
 		// This must be less than the MTBF
 		ElectionTimer: time.NewTimer(helpers.GetNewElectionTimeout()),
 		// This must be less than the election timeout to ensure that the leader sends heartbeats before followers can time out
-		HeartBeatInterval: 500 * time.Millisecond, // This is fixed for all nodes,
+		HeartBeatInterval: 3000 * time.Millisecond, // This is fixed for all nodes,
 		// Intialize all other fields to their default values
 		CurrentTerm:    0,
 		VotedFor:       "",

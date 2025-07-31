@@ -19,7 +19,7 @@ func main() {
 	// Parse command-line arguments
 	config := flags.InitCLIFlags()
 
-	logger.Log.Info("Executing Raft CLI command",
+	logger.Log.Debug("Executing Raft CLI command",
 		zap.Any("config", config),
 	)
 
@@ -35,7 +35,7 @@ func main() {
 	}
 
 	// pretty print the result
-	logger.Log.Info("Command executed successfully",
+	logger.Log.Debug("Command executed successfully",
 		zap.Any("result", result),
 	)
 
