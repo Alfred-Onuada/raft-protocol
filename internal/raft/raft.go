@@ -941,8 +941,13 @@ func Init(config *customtypes.Config) {
 	}
 }
 
-// resetElectionTimer safely stops, and resets the election timer
+// resetElectionTimer safely stops, drains (remove the tick) and resets the election timer
 func (n *Node) resetElectionTimer() {
-	n.ElectionTimer.Stop()
+	if !n.ElectionTimer.Stop() {
+		select {
+		case <-n.ElectionTimer.C:
+		default:
+		}
+	}
 	n.ElectionTimer.Reset(helpers.GetNewElectionTimeout())
 }
