@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 
@@ -11,6 +13,12 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+func generateRequestID() string {
+	bytes := make([]byte, 16)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)
+}
 
 func main() {
 	// Initialize the logger
@@ -23,12 +31,15 @@ func main() {
 		zap.Any("config", config),
 	)
 
+	// Generate a unique request ID
+	requestID := generateRequestID()
+	
 	// Connect to the Raft node and execute the command
 	result, err := raftcli.ExecuteCommand(config.NodeAddress, customtypes.Command{
 		Type:  config.CommandType,
 		Key:   config.Key,
 		Value: config.Value,
-	})
+	}, requestID)
 	if err != nil {
 		logger.Log.Error("Error executing command:", zap.Error(err))
 		return

@@ -13,7 +13,7 @@ import (
 
 // ExecuteCommand connects to the specified Raft node and executes the given command.
 // It returns the result of the command or an error if the command failed.
-func ExecuteCommand(nodeAddr string, command customtypes.Command) (*customtypes.ClientCommandsResp, error) {
+func ExecuteCommand(nodeAddr string, command customtypes.Command, requestID string) (*customtypes.ClientCommandsResp, error) {
 	logger.Log.Debug("Connecting to Raft node",
 		zap.String("nodeAddress", nodeAddr),
 	)
@@ -26,7 +26,8 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command) (*customtypes.
 
 	// prepare the RPC arguments
 	args := &customtypes.ClientCommandsArgs{
-		Command: command,
+		Command:   command,
+		RequestID: requestID,
 	}
 	var resp customtypes.ClientCommandsResp
 
@@ -45,7 +46,7 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command) (*customtypes.
 		if resp.Redirect && resp.LeaderAddress != "" {
 			fmt.Printf("Redirecting to leader at %s\n", resp.LeaderAddress)
 
-			return ExecuteCommand(resp.LeaderAddress, command)
+			return ExecuteCommand(resp.LeaderAddress, command, requestID)
 		}
 
 		return nil, fmt.Errorf("command failed: %s", resp.Error)

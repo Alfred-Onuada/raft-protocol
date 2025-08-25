@@ -7,11 +7,10 @@ import (
 )
 
 func GetNewElectionTimeout() time.Duration {
-	// Generate a random timeout between 1000ms and 5000ms exclusive
-	// In production, this should be between 150ms and 300ms but for testing purposes, we use a larger range so we can see the logs more clearly
+	// Generate a random timeout between 150ms and 300ms as recommended by the Raft paper
+	// This ensures quick leader election while avoiding split votes
 	millisecondsToNanoseconds := 1_000_000
-	// Ensure different nodes have different timers
-	timeoutMs := rand.Intn(1000) + 4000
+	timeoutMs := rand.Intn(150) + 150 // 150-300ms range
 	timeoutNs := timeoutMs * millisecondsToNanoseconds
 
 	return time.Duration(timeoutNs)

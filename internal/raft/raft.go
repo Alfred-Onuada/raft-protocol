@@ -61,6 +61,8 @@ type Node struct {
 
 	// State machine
 	State map[string]int
+	// Track processed request IDs to prevent duplicate execution
+	ProcessedRequests map[string]*customtypes.ClientCommandsResp
 }
 
 // RequestVote function handles the RequestVote RPC call
@@ -103,7 +105,7 @@ func (n *Node) RequestVote(args *customtypes.RequestVoteArgs, resp *customtypes.
 	var myLastIndex uint64 = 0
 	var myLastTerm uint32 = 0
 	if len(n.Logs) > 0 {
-		myLastIndex = uint64(len(n.Logs) - 1)
+		myLastIndex = n.Logs[len(n.Logs)-1].Index
 		myLastTerm = n.Logs[len(n.Logs)-1].Term
 	}
 
@@ -163,24 +165,28 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 	}
 
 	// Reject if there is no matching entry at PrevLogIndex with PrevLogTerm
-	if len(n.Logs) == 0 {
-		if !(args.PrevLogIndex == 0 && args.PrevLogTerm == 0) {
-			funcLogger.Debug("Rejecting AppendEntries due to empty log and non-zero prev index/term",
-				zap.Uint64("prevLogIndex", args.PrevLogIndex), zap.Uint32("prevLogTerm", args.PrevLogTerm))
-			resp.Term = n.CurrentTerm
-			resp.Success = false
-			return nil
-		}
+	if args.PrevLogIndex == 0 && args.PrevLogTerm == 0 {
+		// This is valid - leader is sending entries starting from the beginning
 	} else {
-		lastIndex := uint64(len(n.Logs) - 1)
-		if args.PrevLogIndex > lastIndex {
-			funcLogger.Debug("Rejecting AppendEntries due to prevLogIndex beyond last index", zap.Uint64("prevLogIndex", args.PrevLogIndex), zap.Uint64("lastIndex", lastIndex))
+		// Find the log entry at PrevLogIndex
+		var foundEntry *customtypes.Log = nil
+		for i := range n.Logs {
+			if n.Logs[i].Index == args.PrevLogIndex {
+				foundEntry = &n.Logs[i]
+				break
+			}
+		}
+		if foundEntry == nil {
+			funcLogger.Debug("Rejecting AppendEntries due to missing entry at PrevLogIndex", zap.Uint64("prevLogIndex", args.PrevLogIndex))
 			resp.Term = n.CurrentTerm
 			resp.Success = false
 			return nil
 		}
-		if n.Logs[args.PrevLogIndex].Term != args.PrevLogTerm {
-			funcLogger.Debug("Rejecting AppendEntries due to term mismatch at PrevLogIndex", zap.Uint64("prevLogIndex", args.PrevLogIndex), zap.Uint32("prevLogTerm", args.PrevLogTerm))
+		if foundEntry.Term != args.PrevLogTerm {
+			funcLogger.Debug("Rejecting AppendEntries due to term mismatch at PrevLogIndex", 
+				zap.Uint64("prevLogIndex", args.PrevLogIndex), 
+				zap.Uint32("prevLogTerm", args.PrevLogTerm),
+				zap.Uint32("actualTerm", foundEntry.Term))
 			resp.Term = n.CurrentTerm
 			resp.Success = false
 			return nil
@@ -188,16 +194,25 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 	}
 
 	// Perform a clean up of log entries if needed
-	for i, entry := range args.Entries {
-		// get the index for this new entry
-		idx := args.PrevLogIndex + uint64(i) + 1
-
-		// If there is an entry at that index, in a different term, we need to delete it and all that follow
-		if idx < uint64(len(n.Logs)) && n.Logs[idx].Term != entry.Term {
-			funcLogger.Debug("Cleaning up log entries due to term mismatch", zap.Uint64("index", idx), zap.Uint32("entryTerm", entry.Term), zap.Uint32("currentTerm", n.Logs[idx].Term))
-
-			// Remove all entries from the log starting from this index
-			n.Logs = n.Logs[:idx]
+	for _, entry := range args.Entries {
+		// Find if we already have an entry at this index
+		conflictIndex := -1
+		for i, existingEntry := range n.Logs {
+			if existingEntry.Index == entry.Index {
+				if existingEntry.Term != entry.Term {
+					conflictIndex = i
+					funcLogger.Debug("Found conflicting entry, removing from this point", 
+						zap.Uint64("index", entry.Index), 
+						zap.Uint32("existingTerm", existingEntry.Term),
+						zap.Uint32("newTerm", entry.Term))
+				}
+				break
+			}
+		}
+		
+		// If we found a conflict, remove all entries from that point onward
+		if conflictIndex >= 0 {
+			n.Logs = n.Logs[:conflictIndex]
 			break
 		}
 	}
@@ -216,23 +231,47 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 		n.IsLeader = false // Set the node to not be a leader anymore
 	}
 
-	// Append the new entries to the log
+	// Append the new entries to the log (only if we don't already have them)
 	for _, entry := range args.Entries {
-		funcLogger.Debug("Appending entry to log", zap.Any("entry", entry))
-		n.Logs = append(n.Logs, entry)
+		alreadyExists := false
+		for _, existingEntry := range n.Logs {
+			if existingEntry.Index == entry.Index {
+				alreadyExists = true
+				break
+			}
+		}
+		if !alreadyExists {
+			funcLogger.Debug("Appending entry to log", zap.Any("entry", entry))
+			n.Logs = append(n.Logs, entry)
+		}
 	}
 	// Update the node's last committed index
 	if args.LeaderCommit > n.CommitIndex {
 		funcLogger.Debug("Updating commit index", zap.Uint64("leaderCommit", args.LeaderCommit), zap.Uint64("currentCommitIndex", n.CommitIndex))
-		n.CommitIndex = uint64(math.Min(float64(args.LeaderCommit), float64(len(n.Logs)-1)))
+		// Find the index of the last new entry or our last log entry
+		lastNewEntryIndex := n.CommitIndex
+		if len(args.Entries) > 0 {
+			lastNewEntryIndex = args.Entries[len(args.Entries)-1].Index
+		} else if len(n.Logs) > 0 {
+			lastNewEntryIndex = n.Logs[len(n.Logs)-1].Index
+		}
+		n.CommitIndex = uint64(math.Min(float64(args.LeaderCommit), float64(lastNewEntryIndex)))
 	}
 
 	// apply the logs to the state machine
 	for i := n.LastApplied + 1; i <= n.CommitIndex; i++ {
-		entry := n.Logs[i]
-		funcLogger.Debug("Applying log entry to state machine", zap.Any("entry", entry))
-
-		n.applyLogToStateMachine(entry, i)
+		// Find the log entry with index i
+		var entryToApply *customtypes.Log = nil
+		for j := range n.Logs {
+			if n.Logs[j].Index == i {
+				entryToApply = &n.Logs[j]
+				break
+			}
+		}
+		if entryToApply != nil {
+			funcLogger.Debug("Applying log entry to state machine", zap.Any("entry", *entryToApply))
+			n.applyLogToStateMachine(*entryToApply, i)
+		}
 	}
 
 	funcLogger.Debug("AppendEntries successful", zap.Uint64("commitIndex", n.CommitIndex), zap.Uint64("lastApplied", n.LastApplied))
@@ -254,7 +293,17 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 
 	funcLogger.Debug("Received ClientCommand RPC", zap.Any("args", args), zap.Bool("isLeader", n.IsLeader))
 
-	// If this node is not the leader, return the leader's ID and address
+	// Check if we've already processed this request ID
+	if args.RequestID != "" {
+		if cachedResp, exists := n.ProcessedRequests[args.RequestID]; exists {
+			funcLogger.Debug("Returning cached response for duplicate request", zap.String("requestID", args.RequestID))
+			*resp = *cachedResp
+			n.mu.Unlock()
+			return nil
+		}
+	}
+
+	// For read consistency, all commands (including reads) must go through the leader
 	if !n.IsLeader {
 		funcLogger.Debug("Command was received on a follower, returning leader information")
 
@@ -325,6 +374,15 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 	// If command is not a mutation command, applying to state machine does nothing, so here the command is processed and the response is set
 	n.executeNonMutationCommands(args.Command, resp)
 
+	// Cache the response for this request ID to prevent duplicate execution
+	if args.RequestID != "" {
+		n.mu.Lock()
+		// Create a copy of the response to cache
+		cachedResp := *resp
+		n.ProcessedRequests[args.RequestID] = &cachedResp
+		n.mu.Unlock()
+	}
+
 	funcLogger.Debug("Client command processed successfully", zap.Any("response", resp))
 	return nil
 }
@@ -346,13 +404,23 @@ func (n *Node) replicateLogEntriesToMembers(logEntries []customtypes.Log) {
 		// Compute per-follower prev index/term based on NextIndex
 		var prevLogIndex uint64 = 0
 		var prevLogTerm uint32 = 0
-		if n.Members[memberIdx].NextIndex > 0 && int(n.Members[memberIdx].NextIndex-1) < len(n.Logs) {
-			prevLogIndex = n.Members[memberIdx].NextIndex - 1
-			prevLogTerm = n.Logs[prevLogIndex].Term
+		if n.Members[memberIdx].NextIndex > 0 {
+			// Find the log entry at NextIndex - 1
+			for _, logEntry := range n.Logs {
+				if logEntry.Index == n.Members[memberIdx].NextIndex-1 {
+					prevLogIndex = logEntry.Index
+					prevLogTerm = logEntry.Term
+					break
+				}
+			}
 		}
-		// Entries are the logs starting at NextIndex
-		entries := make([]customtypes.Log, len(n.Logs[n.Members[memberIdx].NextIndex:]))
-		copy(entries, n.Logs[n.Members[memberIdx].NextIndex:])
+		// Find all log entries starting from NextIndex
+		entries := make([]customtypes.Log, 0)
+		for _, logEntry := range n.Logs {
+			if logEntry.Index >= n.Members[memberIdx].NextIndex {
+				entries = append(entries, logEntry)
+			}
+		}
 		term := n.CurrentTerm
 		leaderCommit := n.CommitIndex
 		n.mu.Unlock()
@@ -436,8 +504,8 @@ func (n *Node) requestMemberVote(member Member) {
 	lastLogIndex := uint64(0)
 	lastLogTerm := uint32(0)
 	if len(n.Logs) > 0 {
-		lastLogIndex = uint64(len(n.Logs) - 1)
-		lastLogTerm = n.Logs[lastLogIndex].Term
+		lastLogIndex = n.Logs[len(n.Logs)-1].Index
+		lastLogTerm = n.Logs[len(n.Logs)-1].Term
 	}
 
 	args := &customtypes.RequestVoteArgs{
@@ -470,7 +538,8 @@ func (n *Node) requestMemberVote(member Member) {
 		n.VotesReceived++
 
 		// If the node has received a majority of votes, it becomes the leader
-		if n.VotesReceived > len(n.Members)/2 && !n.IsLeader {
+		majorityThreshold := len(n.Members)/2 + 1
+		if n.VotesReceived >= majorityThreshold && !n.IsLeader {
 			funcLogger.Info("Node has become the leader", zap.String("nodeID", n.ID), zap.Uint32("currentTerm", n.CurrentTerm))
 			n.LeaderID = &n.ID
 			n.IsLeader = true
@@ -478,7 +547,7 @@ func (n *Node) requestMemberVote(member Member) {
 			// Initialize NextIndex for all followers to lastLogIndex + 1
 			lastLogIndex := uint64(0)
 			if len(n.Logs) > 0 {
-				lastLogIndex = uint64(len(n.Logs) - 1)
+				lastLogIndex = n.Logs[len(n.Logs)-1].Index
 			}
 			for idx := range n.Members {
 				if n.Members[idx].ID == n.ID {
@@ -566,13 +635,22 @@ func (n *Node) sendHeartbeatToMember(member Member, memberIdx int, args *customt
 		// Recompute args based on new NextIndex
 		var prevLogIndex uint64 = 0
 		var prevLogTerm uint32 = 0
-		if n.Members[memberIdx].NextIndex > 0 && int(n.Members[memberIdx].NextIndex-1) < len(n.Logs) {
-			prevLogIndex = n.Members[memberIdx].NextIndex - 1
-			prevLogTerm = n.Logs[prevLogIndex].Term
+		if n.Members[memberIdx].NextIndex > 0 {
+			// Find the log entry at NextIndex - 1
+			for _, logEntry := range n.Logs {
+				if logEntry.Index == n.Members[memberIdx].NextIndex-1 {
+					prevLogIndex = logEntry.Index
+					prevLogTerm = logEntry.Term
+					break
+				}
+			}
 		}
 		entries := make([]customtypes.Log, 0)
-		if int(n.Members[memberIdx].NextIndex) <= len(n.Logs) {
-			entries = append(entries, n.Logs[n.Members[memberIdx].NextIndex:]...)
+		// Find all log entries starting from NextIndex
+		for _, logEntry := range n.Logs {
+			if logEntry.Index >= n.Members[memberIdx].NextIndex {
+				entries = append(entries, logEntry)
+			}
 		}
 		args = &customtypes.AppendEntriesArgs{
 			Term:         n.CurrentTerm,
@@ -594,32 +672,41 @@ func (n *Node) updateCommitIndex() {
 	funcLogger.Debug("Updating commit index based on members' match indices", zap.Uint64("currentCommitIndex", n.CommitIndex), zap.Int("logsLength", len(n.Logs)))
 
 	// Count how many followers have replicated each log index
-	for i := n.CommitIndex + 1; i < uint64(len(n.Logs)); i++ {
+	// Go through each log entry and check if majority has replicated it
+	for _, logEntry := range n.Logs {
+		if logEntry.Index <= n.CommitIndex {
+			continue // Skip already committed entries
+		}
 		count := 1 // Count the leader itself
 		for _, member := range n.Members {
 			if member.ID == n.ID {
 				continue
 			}
-			if member.MatchIndex >= i {
+			if member.MatchIndex >= logEntry.Index {
 				count++
 			}
 		}
 
-		funcLogger.Debug("Checking for majority replication", zap.Uint64("index", i), zap.Int("count", count))
+		funcLogger.Debug("Checking for majority replication", zap.Uint64("index", logEntry.Index), zap.Int("count", count))
 
-		// If a majority has replicated this index and it’s from the current term
-		if count > len(n.Members)/2 && n.Logs[i].Term == n.CurrentTerm {
-			n.CommitIndex = i
+		// If a majority has replicated this index and it's from the current term
+		majorityThreshold := len(n.Members)/2 + 1
+		if count >= majorityThreshold && logEntry.Term == n.CurrentTerm {
+			n.CommitIndex = logEntry.Index
 			funcLogger.Debug("Updated CommitIndex", zap.Uint64("commitIndex", n.CommitIndex))
 		} else {
-			break
+			break // Stop at first non-majority entry
 		}
 	}
 
 	// Apply newly committed entries
 	for i := n.LastApplied + 1; i <= n.CommitIndex; i++ {
-		if i < uint64(len(n.Logs)) {
-			n.applyLogToStateMachine(n.Logs[i], i)
+		// Find the log entry with index i
+		for _, logEntry := range n.Logs {
+			if logEntry.Index == i {
+				n.applyLogToStateMachine(logEntry, i)
+				break
+			}
 		}
 	}
 }
@@ -649,19 +736,25 @@ func (n *Node) broadcastHeartbeat() {
 				// Per-follower prev index/term from NextIndex
 				var prevLogIndex uint64 = 0
 				var prevLogTerm uint32 = 0
-				if n.Members[memberIdx].NextIndex > 0 && int(n.Members[memberIdx].NextIndex-1) < len(n.Logs) {
-					prevLogIndex = n.Members[memberIdx].NextIndex - 1
-					prevLogTerm = n.Logs[prevLogIndex].Term
+				if n.Members[memberIdx].NextIndex > 0 {
+					// Find the log entry at NextIndex - 1
+					for _, logEntry := range n.Logs {
+						if logEntry.Index == n.Members[memberIdx].NextIndex-1 {
+							prevLogIndex = logEntry.Index
+							prevLogTerm = logEntry.Term
+							break
+						}
+					}
 				}
 
-				// Create a new customtypes.AppendEntriesArgs with an empty entries array
+				// Send empty heartbeat (no entries) - log replication is handled separately
 				args := &customtypes.AppendEntriesArgs{
 					Term:         n.CurrentTerm,
 					LeaderID:     n.ID,
 					PrevLogIndex: prevLogIndex,
 					PrevLogTerm:  prevLogTerm,
-					Entries:      n.Logs[n.Members[memberIdx].NextIndex:], // send all the missing logs to the member
-					LeaderCommit: n.CommitIndex,                           // Current commit index
+					Entries:      []customtypes.Log{}, // Empty heartbeat
+					LeaderCommit: n.CommitIndex,       // Current commit index
 				}
 				n.mu.Unlock()
 
@@ -759,7 +852,7 @@ func newNode(config *customtypes.Config) *Node {
 		// This must be less than the MTBF
 		ElectionTimer: time.NewTimer(helpers.GetNewElectionTimeout()),
 		// This must be less than the election timeout to ensure that the leader sends heartbeats before followers can time out
-		HeartBeatInterval: 3000 * time.Millisecond, // This is fixed for all nodes,
+		HeartBeatInterval: 50 * time.Millisecond, // Much less than election timeout (150-300ms)
 		// Intialize all other fields to their default values
 		CurrentTerm:    0,
 		VotedFor:       "",
@@ -769,8 +862,9 @@ func newNode(config *customtypes.Config) *Node {
 		VotesReceived:  0,
 		LeaderID:       nil, // No leader at the start
 		IsLeader:       false,
-		LeaderStopChan: make(chan bool, 1),   // Buffered to avoid blocking
-		State:          make(map[string]int), // Initialize the state machine
+		LeaderStopChan:    make(chan bool, 1),                                    // Buffered to avoid blocking
+		State:             make(map[string]int),                                // Initialize the state machine
+		ProcessedRequests: make(map[string]*customtypes.ClientCommandsResp), // Initialize request ID tracking
 	}
 }
 

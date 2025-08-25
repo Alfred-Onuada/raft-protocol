@@ -43,6 +43,8 @@ type AppendEntriesResp struct {
 type ClientCommandsArgs struct {
 	// The incoming command from the client
 	Command Command
+	// Unique request ID to prevent duplicate execution
+	RequestID string
 }
 
 type ClientCommandsResp struct {
