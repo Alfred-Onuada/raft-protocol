@@ -31,9 +31,10 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command, requestID stri
 	}
 	var resp customtypes.ClientCommandsResp
 
-	logger.Log.Debug("Sending command to Raft node",
+	logger.Log.Info("Sending command to Raft node",
 		zap.String("nodeAddress", nodeAddr),
-		zap.Any("command", command),
+		zap.String("command", string(command.Type)),
+		zap.String("key", command.Key),
 	)
 	err = client.Call("Node.ClientCommand", args, &resp)
 	defer client.Close() // Ensure the client is closed after the request
@@ -41,15 +42,20 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command, requestID stri
 		return nil, fmt.Errorf("RPC error: %v", err)
 	}
 
-	if !resp.Success {
-		// The leader address will never be nil if redirect is true but this is to ensure we don't panic
-		if resp.Redirect && resp.LeaderAddress != "" {
-			fmt.Printf("Redirecting to leader at %s\n", resp.LeaderAddress)
+	// The leader address will never be nil if redirect is true but this is to ensure we don't panic
+	if resp.Redirect && resp.LeaderAddress != "" {
+		fmt.Printf("Redirecting to leader at %s\n", resp.LeaderAddress)
 
-			return ExecuteCommand(resp.LeaderAddress, command, requestID)
+		// Execute on leader but preserve redirect info in response
+		redirectedResp, err := ExecuteCommand(resp.LeaderAddress, command, requestID)
+		if err != nil {
+			return nil, err
 		}
-
-		return nil, fmt.Errorf("command failed: %s", resp.Error)
+		// Add redirect information to the final response
+		redirectedResp.Redirect = true
+		redirectedResp.LeaderAddress = resp.LeaderAddress
+		redirectedResp.LeaderID = resp.LeaderID
+		return redirectedResp, nil
 	}
 
 	// Return the response

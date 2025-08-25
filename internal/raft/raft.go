@@ -113,7 +113,7 @@ func (n *Node) RequestVote(args *customtypes.RequestVoteArgs, resp *customtypes.
 	// Grant if candidate's last term > ours, or terms equal and candidate's index >= ours
 	upToDate := args.LastLogTerm > myLastTerm || (args.LastLogTerm == myLastTerm && args.LastLogIndex >= myLastIndex)
 	if upToDate {
-		funcLogger.Debug("Granting vote to candidate", zap.String("candidateID", args.CandidateID), zap.Uint32("candidateTerm", args.Term))
+		funcLogger.Info("Granting vote to candidate", zap.String("candidateID", args.CandidateID), zap.Uint32("candidateTerm", args.Term))
 
 		resp.Term = n.CurrentTerm
 		resp.VoteGranted = true
@@ -159,7 +159,7 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 
 	// If the node is in a lower term than the leader, it should update its term and become a follower
 	if n.CurrentTerm < args.Term {
-		funcLogger.Debug("Node is in a lower term, transistioning to follower state", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("leaderTerm", args.Term))
+		funcLogger.Info("Node is in a lower term, transitioning to follower state", zap.Uint32("currentTerm", n.CurrentTerm), zap.Uint32("leaderTerm", args.Term))
 
 		n.transistionToFollower(args.Term, &args.LeaderID)
 	}
@@ -183,8 +183,8 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 			return nil
 		}
 		if foundEntry.Term != args.PrevLogTerm {
-			funcLogger.Debug("Rejecting AppendEntries due to term mismatch at PrevLogIndex", 
-				zap.Uint64("prevLogIndex", args.PrevLogIndex), 
+			funcLogger.Debug("Rejecting AppendEntries due to term mismatch at PrevLogIndex",
+				zap.Uint64("prevLogIndex", args.PrevLogIndex),
 				zap.Uint32("prevLogTerm", args.PrevLogTerm),
 				zap.Uint32("actualTerm", foundEntry.Term))
 			resp.Term = n.CurrentTerm
@@ -201,15 +201,15 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 			if existingEntry.Index == entry.Index {
 				if existingEntry.Term != entry.Term {
 					conflictIndex = i
-					funcLogger.Debug("Found conflicting entry, removing from this point", 
-						zap.Uint64("index", entry.Index), 
+					funcLogger.Debug("Found conflicting entry, removing from this point",
+						zap.Uint64("index", entry.Index),
 						zap.Uint32("existingTerm", existingEntry.Term),
 						zap.Uint32("newTerm", entry.Term))
 				}
 				break
 			}
 		}
-		
+
 		// If we found a conflict, remove all entries from that point onward
 		if conflictIndex >= 0 {
 			n.Logs = n.Logs[:conflictIndex]
@@ -223,7 +223,7 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 	// Stop the node's heartbeat if it was a leader
 	// At this point it is guaranteed that this node is not the current leader, since it received an AppendEntries RPC and was about to use it.
 	if n.IsLeader {
-		funcLogger.Debug("Stopping leader heartbeat as a new leader has been elected")
+		funcLogger.Info("Stopping leader heartbeat as a new leader has been elected")
 		select {
 		case n.LeaderStopChan <- true:
 		default:
@@ -291,7 +291,7 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 		zap.Any("command", args.Command),
 	)
 
-	funcLogger.Debug("Received ClientCommand RPC", zap.Any("args", args), zap.Bool("isLeader", n.IsLeader))
+	funcLogger.Info("Received ClientCommand RPC", zap.String("command", string(args.Command.Type)), zap.String("key", args.Command.Key), zap.Bool("isLeader", n.IsLeader))
 
 	// Check if we've already processed this request ID
 	if args.RequestID != "" {
@@ -311,7 +311,7 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 			// Find the leader's address from Members
 			for _, member := range n.Members {
 				if member.ID == *n.LeaderID {
-					funcLogger.Debug("Found leader address", zap.String("leaderID", *n.LeaderID), zap.String("leaderAddress", member.Address))
+					funcLogger.Info("Redirecting client to leader", zap.String("leaderID", *n.LeaderID), zap.String("leaderAddress", member.Address))
 
 					resp.LeaderID = *n.LeaderID
 					resp.LeaderAddress = member.Address
@@ -323,7 +323,7 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 			}
 		}
 
-		funcLogger.Debug("No leader found, cannot redirect command")
+		funcLogger.Warn("No leader found, cannot redirect command")
 		// Fail if there is no leader in the cluster
 		resp.Success = false
 		resp.Error = "No leader known at this moment"
@@ -331,48 +331,57 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 		return nil
 	}
 
-	// Append the command to the log
-	logEntry := customtypes.Log{
-		Term:      n.CurrentTerm,
-		Content:   args.Command,
-		Timestamp: time.Now(),
-		Index:     uint64(len(n.Logs)), // The index is the current length
-	}
-
-	funcLogger.Debug("Appending client command to log", zap.Any("logEntry", logEntry))
-	n.Logs = append(n.Logs, logEntry)
-	n.mu.Unlock()
-
-	// Replicate the log entry to followers (the heartbeat already contains logic to send the appropriate logs)
-	n.replicateLogEntriesToMembers([]customtypes.Log{logEntry})
-
-	// Wait until the entry is committed or timeout
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		n.mu.Lock()
-		committed := n.CommitIndex >= logEntry.Index
+	// Check if this is a read-only command that doesn't need replication
+	if args.Command.Type == customtypes.GetCommand || args.Command.Type == customtypes.TopologyCommand {
+		funcLogger.Debug("Handling read-only command immediately", zap.String("command", string(args.Command.Type)))
+		// Handle read-only commands immediately without log replication
+		n.executeNonMutationCommands(args.Command, resp)
+		funcLogger.Debug("Read-only command processed", zap.Bool("success", resp.Success))
 		n.mu.Unlock()
-		if committed {
-			break
+	} else {
+		// Handle mutation commands through log replication
+		logEntry := customtypes.Log{
+			Term:      n.CurrentTerm,
+			Content:   args.Command,
+			Timestamp: time.Now(),
+			Index:     uint64(len(n.Logs)), // The index is the current length
 		}
-		if time.Now().After(deadline) {
-			funcLogger.Warn("Timeout exceeded while waiting for command to be committed")
-			resp.Success = false
-			resp.Error = "Timeout exceeded while waiting for command to be committed"
-			return nil
+
+		funcLogger.Info("Appending client command to log", zap.String("command", string(logEntry.Content.Type)), zap.String("key", logEntry.Content.Key), zap.Uint64("index", logEntry.Index))
+		n.Logs = append(n.Logs, logEntry)
+		n.mu.Unlock()
+
+		// Replicate the log entry to followers (the heartbeat already contains logic to send the appropriate logs)
+		n.replicateLogEntriesToMembers([]customtypes.Log{logEntry})
+
+		// Wait until the entry is committed or timeout
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			n.mu.Lock()
+			committed := n.CommitIndex >= logEntry.Index
+			n.mu.Unlock()
+			if committed {
+				break
+			}
+			if time.Now().After(deadline) {
+				funcLogger.Error("Timeout exceeded while waiting for command to be committed", zap.String("command", string(args.Command.Type)), zap.String("key", args.Command.Key))
+				resp.Success = false
+				resp.Error = "Timeout exceeded while waiting for command to be committed"
+				return nil
+			}
+			time.Sleep(50 * time.Millisecond)
 		}
-		time.Sleep(50 * time.Millisecond)
-	}
 
-	// Apply the command to the state machine if not already applied
-	n.mu.Lock()
-	if n.LastApplied < logEntry.Index {
-		n.applyLogToStateMachine(logEntry, logEntry.Index)
-	}
-	n.mu.Unlock()
+		// Apply the command to the state machine if not already applied
+		n.mu.Lock()
+		if n.LastApplied < logEntry.Index {
+			n.applyLogToStateMachine(logEntry, logEntry.Index)
+		}
+		n.mu.Unlock()
 
-	// If command is not a mutation command, applying to state machine does nothing, so here the command is processed and the response is set
-	n.executeNonMutationCommands(args.Command, resp)
+		// Set success for mutation commands
+		resp.Success = true
+	}
 
 	// Cache the response for this request ID to prevent duplicate execution
 	if args.RequestID != "" {
@@ -383,7 +392,7 @@ func (n *Node) ClientCommand(args *customtypes.ClientCommandsArgs, resp *customt
 		n.mu.Unlock()
 	}
 
-	funcLogger.Debug("Client command processed successfully", zap.Any("response", resp))
+	funcLogger.Info("Client command processed successfully", zap.String("command", string(args.Command.Type)), zap.String("key", args.Command.Key), zap.Bool("success", resp.Success))
 	return nil
 }
 
@@ -447,6 +456,40 @@ func (n *Node) executeNonMutationCommands(command customtypes.Command, resp *cus
 			resp.Success = false
 			resp.Error = "Key not found"
 		}
+	case customtypes.TopologyCommand:
+		funcLogger := logger.Log.With(zap.String("nodeID", n.ID))
+		funcLogger.Debug("Processing topology command")
+		// Build topology information
+		topology := &customtypes.TopologyInfo{
+			CurrentTerm: n.CurrentTerm,
+			LeaderID:    "",
+			Members:     make([]customtypes.MemberInfo, len(n.Members)),
+		}
+
+		if n.LeaderID != nil {
+			topology.LeaderID = *n.LeaderID
+		}
+
+		// Build member information
+		for _, member := range n.Members {
+			memberInfo := customtypes.MemberInfo{
+				ID:       member.ID,
+				Address:  member.Address,
+				Term:     n.CurrentTerm,
+				IsOnline: true, // Assume online for simplicity
+				Role:     "follower",
+			}
+
+			if n.LeaderID != nil && member.ID == *n.LeaderID {
+				memberInfo.Role = "leader"
+			}
+
+			topology.Members = append(topology.Members, memberInfo)
+		}
+
+		// Put topology directly in Result field for simpler RPC serialization
+		resp.Result = topology
+		funcLogger.Debug("Topology command completed", zap.Int("memberCount", len(topology.Members)), zap.String("leaderID", topology.LeaderID))
 	default:
 		resp.Result = nil // No result for Set, Increase, Decrease, Delete
 	}
@@ -495,7 +538,7 @@ func (n *Node) requestMemberVote(member Member) {
 	logger.Log.Debug("Requesting vote from member", zap.String("memberID", member.ID), zap.String("memberAddress", member.Address))
 	client, err := rpc.Dial("tcp", member.Address)
 	if err != nil {
-		funcLogger.Error("Failed to dial member for vote request", zap.Error(err))
+		funcLogger.Warn("Failed to dial member for vote request", zap.String("memberID", member.ID), zap.Error(err))
 		return
 	}
 	defer client.Close() // Ensure the client is closed after the request
@@ -517,7 +560,7 @@ func (n *Node) requestMemberVote(member Member) {
 	var resp customtypes.RequestVoteResp
 	err = client.Call("Node.RequestVote", args, &resp)
 	if err != nil {
-		funcLogger.Error("Failed to call RequestVote on member", zap.Error(err))
+		funcLogger.Warn("Failed to call RequestVote on member", zap.String("memberID", member.ID), zap.Error(err))
 		return
 	}
 	funcLogger.Debug("Received vote response from member", zap.Any("response", resp))
@@ -534,7 +577,7 @@ func (n *Node) requestMemberVote(member Member) {
 
 	// If the response is successful, increment the votes received
 	if resp.VoteGranted {
-		funcLogger.Debug("Vote granted by member", zap.String("memberID", member.ID))
+		funcLogger.Info("Vote granted by member", zap.String("memberID", member.ID))
 		n.VotesReceived++
 
 		// If the node has received a majority of votes, it becomes the leader
@@ -560,7 +603,7 @@ func (n *Node) requestMemberVote(member Member) {
 			// Reset the election timer as the node is now the leader
 			n.resetElectionTimer()
 			// Begin broadcasting heartbeats to other members
-			funcLogger.Debug("Broadcasting heartbeat to other members")
+			funcLogger.Info("Node became leader, starting heartbeat broadcasts")
 			go n.broadcastHeartbeat()
 		}
 	} else {
@@ -578,7 +621,7 @@ func (n *Node) sendHeartbeatToMember(member Member, memberIdx int, args *customt
 
 	client, err := rpc.Dial("tcp", member.Address)
 	if err != nil {
-		funcLogger.Error("Failed to dial member for heartbeat", zap.Error(err))
+		funcLogger.Warn("Failed to dial member for heartbeat", zap.String("memberID", member.ID), zap.Error(err))
 		return
 	}
 	defer client.Close() // Ensure the client is closed after the request
@@ -587,7 +630,7 @@ func (n *Node) sendHeartbeatToMember(member Member, memberIdx int, args *customt
 		var resp customtypes.AppendEntriesResp
 		callErr := client.Call("Node.AppendEntries", args, &resp)
 		if callErr != nil {
-			funcLogger.Error("Failed to call AppendEntries on member", zap.Error(callErr))
+			funcLogger.Warn("Failed to call AppendEntries on member", zap.String("memberID", member.ID), zap.Error(callErr))
 			return
 		}
 
@@ -733,26 +776,12 @@ func (n *Node) broadcastHeartbeat() {
 				}
 
 				n.mu.Lock()
-				// Per-follower prev index/term from NextIndex
-				var prevLogIndex uint64 = 0
-				var prevLogTerm uint32 = 0
-				if n.Members[memberIdx].NextIndex > 0 {
-					// Find the log entry at NextIndex - 1
-					for _, logEntry := range n.Logs {
-						if logEntry.Index == n.Members[memberIdx].NextIndex-1 {
-							prevLogIndex = logEntry.Index
-							prevLogTerm = logEntry.Term
-							break
-						}
-					}
-				}
-
-				// Send empty heartbeat (no entries) - log replication is handled separately
+				// For heartbeats, use simple approach - no log matching required
 				args := &customtypes.AppendEntriesArgs{
 					Term:         n.CurrentTerm,
 					LeaderID:     n.ID,
-					PrevLogIndex: prevLogIndex,
-					PrevLogTerm:  prevLogTerm,
+					PrevLogIndex: 0, // Simple heartbeat with no log consistency check
+					PrevLogTerm:  0,
 					Entries:      []customtypes.Log{}, // Empty heartbeat
 					LeaderCommit: n.CommitIndex,       // Current commit index
 				}
@@ -776,7 +805,7 @@ func (n *Node) checkElectionTimeoutExpiry() {
 	for {
 		<-n.ElectionTimer.C
 		// When the election timer expires, become a candidate
-		funcLogger.Debug("Election timer expired, transistioning to candidate state")
+		funcLogger.Info("Election timer expired, transitioning to candidate state")
 		n.mu.Lock()
 		n.transistionToCandidate()
 		n.mu.Unlock()
@@ -788,7 +817,7 @@ func (n *Node) transistionToCandidate() {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
-	funcLogger.Debug("Node is becoming a candidate", zap.String("nodeID", n.ID))
+	funcLogger.Info("Node is becoming a candidate", zap.String("nodeID", n.ID), zap.Uint32("newTerm", n.CurrentTerm+1))
 
 	// Increment the current term
 	n.CurrentTerm++
@@ -817,13 +846,13 @@ func (n *Node) transistionToFollower(term uint32, leaderID *string) {
 	funcLogger := logger.Log.With(
 		zap.String("nodeID", n.ID),
 	)
-	funcLogger.Debug("Node is transistioning to follower state", zap.String("nodeID", n.ID))
+	funcLogger.Info("Node is transitioning to follower state", zap.String("nodeID", n.ID), zap.Uint32("newTerm", term))
 
 	n.CurrentTerm = term
 	n.VotedFor = ""       // Reset the voted for field
 	n.LeaderID = leaderID // Set the leader ID to the given leader ID
 	if n.IsLeader {
-		funcLogger.Debug("Stopping leader heartbeat as a new leader has been elected")
+		funcLogger.Info("Stopping leader heartbeat as a new leader has been elected")
 		n.IsLeader = false       // Set the node to not be a leader anymore
 		n.LeaderStopChan <- true // Stop the leader's heartbeat if it was a leader
 	}
@@ -854,16 +883,16 @@ func newNode(config *customtypes.Config) *Node {
 		// This must be less than the election timeout to ensure that the leader sends heartbeats before followers can time out
 		HeartBeatInterval: 50 * time.Millisecond, // Much less than election timeout (150-300ms)
 		// Intialize all other fields to their default values
-		CurrentTerm:    0,
-		VotedFor:       "",
-		Logs:           []customtypes.Log{},
-		CommitIndex:    0,
-		LastApplied:    0,
-		VotesReceived:  0,
-		LeaderID:       nil, // No leader at the start
-		IsLeader:       false,
-		LeaderStopChan:    make(chan bool, 1),                                    // Buffered to avoid blocking
-		State:             make(map[string]int),                                // Initialize the state machine
+		CurrentTerm:       0,
+		VotedFor:          "",
+		Logs:              []customtypes.Log{},
+		CommitIndex:       0,
+		LastApplied:       0,
+		VotesReceived:     0,
+		LeaderID:          nil, // No leader at the start
+		IsLeader:          false,
+		LeaderStopChan:    make(chan bool, 1),                               // Buffered to avoid blocking
+		State:             make(map[string]int),                             // Initialize the state machine
 		ProcessedRequests: make(map[string]*customtypes.ClientCommandsResp), // Initialize request ID tracking
 	}
 }
@@ -871,9 +900,9 @@ func newNode(config *customtypes.Config) *Node {
 // Init initializes the Raft node, registers it for RPC, and starts listening for incoming requests
 func Init(config *customtypes.Config) {
 	// Initialize a new node
-	logger.Log.Debug("Initializing a new Raft node")
+	logger.Log.Info("Initializing a new Raft node")
 	node := newNode(config)
-	logger.Log.Debug("New Raft node initialized", zap.String("nodeID", node.ID))
+	logger.Log.Info("New Raft node initialized", zap.String("nodeID", node.ID))
 
 	// build the node address
 	address := config.Network.Host + ":" + config.Network.IP
@@ -894,7 +923,7 @@ func Init(config *customtypes.Config) {
 		funcLogger.Error("Failed to listen for RPC requests", zap.Error(err))
 		return
 	}
-	funcLogger.Debug("Listening for RPC requests", zap.String("address", address))
+	funcLogger.Info("Listening for RPC requests", zap.String("address", address))
 
 	go node.checkElectionTimeoutExpiry()
 

@@ -34,10 +34,14 @@ func InitCLIFlags() *cliFlags {
 
 	// get the rest of the args
 	args := flag.Args()
-	if len(args) < 2 {
-		panic("Not enough arguments provided. Expected at least 2 arguments: <command> and <key>.")
+	if len(args) < 1 {
+		panic("Not enough arguments provided. Expected at least 1 argument: <command>.")
 	}
-	cmd, key := args[0], args[1]
+	cmd := args[0]
+	var key string
+	if len(args) > 1 {
+		key = args[1]
+	}
 	value := ""
 
 	// Prepend the value if provided, will throw an error later if the command doesn't accept a value
@@ -48,12 +52,12 @@ func InitCLIFlags() *cliFlags {
 	// check that the command is valid
 	config.CommandType = customtypes.CommandType(cmd)
 	if !config.CommandType.IsValid() {
-		panic("Invalid command provided. Valid commands are: set, increase, decrease, del, get.")
+		panic("Invalid command provided. Valid commands are: set, increase, decrease, del, get, topology.")
 	}
 
-	// check that the key is not empty
-	if key == "" {
-		panic("Key cannot be empty. Please provide a valid key.")
+	// check that the key is not empty for commands that require it
+	if config.CommandType != customtypes.TopologyCommand && key == "" {
+		panic("Key cannot be empty for this command. Please provide a valid key.")
 	}
 	// set the key in the config
 	config.Key = key

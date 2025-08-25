@@ -27,13 +27,15 @@ func main() {
 	// Parse command-line arguments
 	config := flags.InitCLIFlags()
 
-	logger.Log.Debug("Executing Raft CLI command",
-		zap.Any("config", config),
+	logger.Log.Info("Executing Raft CLI command",
+		zap.String("command", string(config.CommandType)),
+		zap.String("key", config.Key),
+		zap.String("nodeAddress", config.NodeAddress),
 	)
 
 	// Generate a unique request ID
 	requestID := generateRequestID()
-	
+
 	// Connect to the Raft node and execute the command
 	result, err := raftcli.ExecuteCommand(config.NodeAddress, customtypes.Command{
 		Type:  config.CommandType,
@@ -46,8 +48,9 @@ func main() {
 	}
 
 	// pretty print the result
-	logger.Log.Debug("Command executed successfully",
-		zap.Any("result", result),
+	logger.Log.Info("Command executed successfully",
+		zap.Bool("success", result.Success),
+		zap.Bool("redirect", result.Redirect),
 	)
 
 	output, err := json.MarshalIndent(result, "", "  ")
