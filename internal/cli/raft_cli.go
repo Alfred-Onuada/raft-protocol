@@ -2,7 +2,9 @@ package raftcli
 
 import (
 	"fmt"
+	"net"
 	"net/rpc"
+	"time"
 
 	logger "github.com/Alfred-Onuada/raft-protocol/internal/logging"
 	customtypes "github.com/Alfred-Onuada/raft-protocol/internal/types"
@@ -15,10 +17,12 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command) (*customtypes.
 	logger.Log.Debug("Connecting to Raft node",
 		zap.String("nodeAddress", nodeAddr),
 	)
-	client, err := rpc.Dial("tcp", nodeAddr)
+	// Dial with timeout to avoid hanging
+	conn, err := net.DialTimeout("tcp", nodeAddr, 2*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to node %s: %v", nodeAddr, err)
 	}
+	client := rpc.NewClient(conn)
 
 	// prepare the RPC arguments
 	args := &customtypes.ClientCommandsArgs{
