@@ -41,15 +41,21 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command, requestID stri
 		return nil, fmt.Errorf("RPC error: %v", err)
 	}
 
-	if !resp.Success {
-		// The leader address will never be nil if redirect is true but this is to ensure we don't panic
-		if resp.Redirect && resp.LeaderAddress != "" {
-			fmt.Printf("Redirecting to leader at %s\n", resp.LeaderAddress)
+	// The leader address will never be nil if redirect is true but this is to ensure we don't panic
+	if resp.Redirect && resp.LeaderAddress != "" {
+		fmt.Printf("Redirecting to leader at %s\n", resp.LeaderAddress)
 
-			return ExecuteCommand(resp.LeaderAddress, command, requestID)
+		// preserve the redirect info
+		leaderAddress, redirect := resp.LeaderAddress, resp.Redirect
+
+		resp, err := ExecuteCommand(resp.LeaderAddress, command, requestID)
+		if err != nil {
+			return nil, fmt.Errorf("RPC error: %v", err)
 		}
 
-		return nil, fmt.Errorf("command failed: %s", resp.Error)
+		// re add info
+		resp.LeaderAddress = leaderAddress
+		resp.Redirect = redirect
 	}
 
 	// Return the response
