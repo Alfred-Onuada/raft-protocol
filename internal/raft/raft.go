@@ -183,8 +183,8 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 			return nil
 		}
 		if foundEntry.Term != args.PrevLogTerm {
-			funcLogger.Debug("Rejecting AppendEntries due to term mismatch at PrevLogIndex", 
-				zap.Uint64("prevLogIndex", args.PrevLogIndex), 
+			funcLogger.Debug("Rejecting AppendEntries due to term mismatch at PrevLogIndex",
+				zap.Uint64("prevLogIndex", args.PrevLogIndex),
 				zap.Uint32("prevLogTerm", args.PrevLogTerm),
 				zap.Uint32("actualTerm", foundEntry.Term))
 			resp.Term = n.CurrentTerm
@@ -201,15 +201,15 @@ func (n *Node) AppendEntries(args *customtypes.AppendEntriesArgs, resp *customty
 			if existingEntry.Index == entry.Index {
 				if existingEntry.Term != entry.Term {
 					conflictIndex = i
-					funcLogger.Debug("Found conflicting entry, removing from this point", 
-						zap.Uint64("index", entry.Index), 
+					funcLogger.Debug("Found conflicting entry, removing from this point",
+						zap.Uint64("index", entry.Index),
 						zap.Uint32("existingTerm", existingEntry.Term),
 						zap.Uint32("newTerm", entry.Term))
 				}
 				break
 			}
 		}
-		
+
 		// If we found a conflict, remove all entries from that point onward
 		if conflictIndex >= 0 {
 			n.Logs = n.Logs[:conflictIndex]
@@ -442,11 +442,39 @@ func (n *Node) executeNonMutationCommands(command customtypes.Command, resp *cus
 	switch command.Type {
 	case customtypes.GetCommand:
 		if value, exists := n.State[command.Key]; exists {
-			resp.Result = value
+			resp.Result = &value
 		} else {
 			resp.Success = false
 			resp.Error = "Key not found"
 		}
+	case customtypes.TopologyCommand:
+		var leader string
+		if n.LeaderID != nil {
+			leader = *n.LeaderID
+		}
+
+		topology := customtypes.TopologyInfo{
+			CurrentTerm: n.CurrentTerm,
+			LeaderID:    leader,
+			Members:     make([]customtypes.MemberInfo, 0, len(n.Members)),
+		}
+
+		for _, m := range n.Members {
+			role := "follower"
+			if n.LeaderID != nil && m.ID == *n.LeaderID {
+				role = "leader"
+			}
+			topology.Members = append(topology.Members, customtypes.MemberInfo{
+				ID:       m.ID,
+				Address:  m.Address,
+				Term:     0, // TODO: per-member term if you track it
+				Role:     role,
+				IsOnline: true, // placeholder for now
+			})
+		}
+
+		resp.Topology = &topology
+
 	default:
 		resp.Result = nil // No result for Set, Increase, Decrease, Delete
 	}
@@ -854,16 +882,16 @@ func newNode(config *customtypes.Config) *Node {
 		// This must be less than the election timeout to ensure that the leader sends heartbeats before followers can time out
 		HeartBeatInterval: 50 * time.Millisecond, // Much less than election timeout (150-300ms)
 		// Intialize all other fields to their default values
-		CurrentTerm:    0,
-		VotedFor:       "",
-		Logs:           []customtypes.Log{},
-		CommitIndex:    0,
-		LastApplied:    0,
-		VotesReceived:  0,
-		LeaderID:       nil, // No leader at the start
-		IsLeader:       false,
-		LeaderStopChan:    make(chan bool, 1),                                    // Buffered to avoid blocking
-		State:             make(map[string]int),                                // Initialize the state machine
+		CurrentTerm:       0,
+		VotedFor:          "",
+		Logs:              []customtypes.Log{},
+		CommitIndex:       0,
+		LastApplied:       0,
+		VotesReceived:     0,
+		LeaderID:          nil, // No leader at the start
+		IsLeader:          false,
+		LeaderStopChan:    make(chan bool, 1),                               // Buffered to avoid blocking
+		State:             make(map[string]int),                             // Initialize the state machine
 		ProcessedRequests: make(map[string]*customtypes.ClientCommandsResp), // Initialize request ID tracking
 	}
 }

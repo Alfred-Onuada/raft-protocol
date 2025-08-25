@@ -45,17 +45,16 @@ func ExecuteCommand(nodeAddr string, command customtypes.Command, requestID stri
 	if resp.Redirect && resp.LeaderAddress != "" {
 		fmt.Printf("Redirecting to leader at %s\n", resp.LeaderAddress)
 
-		// preserve the redirect info
-		leaderAddress, redirect := resp.LeaderAddress, resp.Redirect
-
-		resp, err := ExecuteCommand(resp.LeaderAddress, command, requestID)
+		// Execute on leader but preserve redirect info in response
+		redirectedResp, err := ExecuteCommand(resp.LeaderAddress, command, requestID)
 		if err != nil {
-			return nil, fmt.Errorf("RPC error: %v", err)
+			return nil, err
 		}
-
-		// re add info
-		resp.LeaderAddress = leaderAddress
-		resp.Redirect = redirect
+		// Add redirect information to the final response
+		redirectedResp.Redirect = true
+		redirectedResp.LeaderAddress = resp.LeaderAddress
+		redirectedResp.LeaderID = resp.LeaderID
+		return redirectedResp, nil
 	}
 
 	// Return the response

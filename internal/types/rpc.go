@@ -53,11 +53,13 @@ type ClientCommandsResp struct {
 	// If the command was not successful, this will contain the error message
 	Error string
 	// The result of the command if it was successful
-	Result any
+	Result *int
 	// The leader ID of the node that processed the command
 	LeaderID string
 	// The address of the leader node for the client to connect to
 	LeaderAddress string
 	// Indicates if the command needs to be redirected to the leader
 	Redirect bool
+	// Holds the topology result
+	Topology *TopologyInfo
 }

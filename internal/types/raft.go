@@ -14,11 +14,12 @@ const (
 	DecreaseCommand CommandType = "decrease"
 	DelCommand      CommandType = "del"
 	GetCommand      CommandType = "get"
+	TopologyCommand CommandType = "topology"
 )
 
 func (c CommandType) IsValid() bool {
 	switch c {
-	case SetCommand, IncreaseCommand, DecreaseCommand, DelCommand, GetCommand:
+	case SetCommand, IncreaseCommand, DecreaseCommand, DelCommand, GetCommand, TopologyCommand:
 		return true
 	}
 	return false
@@ -42,4 +43,18 @@ type Log struct {
 	Term uint32
 	// The command that was received
 	Content Command
+}
+
+type MemberInfo struct {
+	ID       string
+	Address  string
+	Role     string
+	Term     uint32
+	IsOnline bool
+}
+
+type TopologyInfo struct {
+	CurrentTerm uint32
+	LeaderID    string
+	Members     []MemberInfo
 }
