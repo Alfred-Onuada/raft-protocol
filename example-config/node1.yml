@@ -3,7 +3,7 @@
 # Network info is specified under the network tab
 network:
   host: localhost
-  ip: 7500
+  port: 7500
 
 # Group specifies the name of the system, and is useful for allowing auto discovery
 group:

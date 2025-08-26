@@ -875,7 +875,7 @@ func newNode(config *customtypes.Config) *Node {
 
 	return &Node{
 		// Given that one port can only be used by one node, we can use the host and port as the ID and it is guaranteed to be unique
-		ID:      fmt.Sprintf("%s:%s", config.Network.Host, config.Network.IP),
+		ID:      fmt.Sprintf("%s:%s", config.Network.Host, config.Network.Port),
 		Members: members,
 		// This must be less than the MTBF
 		ElectionTimer: time.NewTimer(helpers.GetNewElectionTimeout()),
@@ -904,7 +904,7 @@ func Init(config *customtypes.Config) {
 	logger.Log.Debug("New Raft node initialized", zap.String("nodeID", node.ID))
 
 	// build the node address
-	address := config.Network.Host + ":" + config.Network.IP
+	address := config.Network.Host + ":" + config.Network.Port
 
 	// append the nodeID and address to logs
 	funcLogger := logger.Log.With(

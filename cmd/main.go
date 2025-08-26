@@ -40,12 +40,12 @@ func main() {
 	}
 
 	logger.Log.Info(
-		fmt.Sprintf("Spinning up Raft node at %s:%s", config.Network.Host, config.Network.IP),
+		fmt.Sprintf("Spinning up Raft node at %s:%s", config.Network.Host, config.Network.Port),
 		zap.Any("config", config),
 	)
 
 	defer func() {
-		logger.Log.Info(fmt.Sprintf("Shutting down Raft node at %s:%s", config.Network.Host, config.Network.IP))
+		logger.Log.Info(fmt.Sprintf("Shutting down Raft node at %s:%s", config.Network.Host, config.Network.Port))
 	}()
 
 	logger.Log.Debug("Initializing Raft protocol with config", zap.Any("config", config))

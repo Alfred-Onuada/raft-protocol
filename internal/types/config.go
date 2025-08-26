@@ -2,7 +2,7 @@ package customtypes
 
 type network struct {
 	Host string `yaml:"host"`
-	IP   string `yaml:"ip"`
+	Port string `yaml:"port"`
 }
 
 type logLevel int8
